@@ -1,0 +1,529 @@
+import numpy as np
+import torch
+torch.manual_seed(2020)
+from torch import nn
+import torch.nn.functional as F
+
+import pdb
+
+def generate_total_sample(num_user, num_item):
+    sample = []
+    for i in range(num_user):
+        sample.extend([[i,j] for j in range(num_item)])
+    return np.array(sample)
+
+def sigmoid(x):
+    return 1.0 / (1 + np.exp(-x))
+
+
+class MF(nn.Module):
+    def __init__(self, num_users, num_items, embedding_k=4, *args, **kwargs):
+        super(MF, self).__init__()
+        self.num_users = num_users
+        self.num_items = num_items
+        self.embedding_k = embedding_k
+        self.W = torch.nn.Embedding(self.num_users, self.embedding_k)
+        self.H = torch.nn.Embedding(self.num_items, self.embedding_k)
+
+        self.sigmoid = torch.nn.Sigmoid()
+        self.xent_func = torch.nn.BCELoss()
+
+    def forward(self, x, is_training=False):
+        user_idx = torch.LongTensor(x[:,0])
+        item_idx = torch.LongTensor(x[:,1])
+        U_emb = self.W(user_idx)
+        V_emb = self.H(item_idx)
+
+        out = torch.sum(U_emb.mul(V_emb), 1)
+
+        if is_training:
+            return out, U_emb, V_emb
+        else:
+            return out
+
+    def fit(self, x, y, 
+        num_epoch=1000, batch_size=128, lr=0.05, lamb=0, 
+        tol=1e-4, verbose=True):
+
+        optimizer = torch.optim.Adam(self.parameters(), lr=lr, weight_decay=lamb)
+        last_loss = 1e9
+
+        num_sample = len(x)
+        total_batch = num_sample // batch_size
+
+        early_stop = 0
+        for epoch in range(num_epoch):
+            all_idx = np.arange(num_sample) # 1-6960
+            np.random.shuffle(all_idx)
+            epoch_loss = 0
+
+            for idx in range(total_batch):
+                # mini-batch training
+                selected_idx = all_idx[batch_size*idx:(idx+1)*batch_size]
+                sub_x = x[selected_idx]
+                sub_y = y[selected_idx]
+                sub_y = torch.Tensor(sub_y)
+                print(sub_x)
+                pred, u_emb, v_emb = self.forward(sub_x, True)
+                pred = self.sigmoid(pred)
+                xent_loss = self.xent_func(pred,sub_y)
+
+                loss = xent_loss
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                for name, param in self.named_parameters():
+                    print(name,param)
+
+                epoch_loss += xent_loss.detach().numpy()
+
+            relative_loss_div = (last_loss-epoch_loss)/(last_loss+1e-10)
+            if  relative_loss_div < tol:
+                if early_stop > 5:
+                    print("[MF] epoch:{}, xent:{}".format(epoch, epoch_loss))
+                    break
+                early_stop += 1
+                
+            last_loss = epoch_loss
+
+            if epoch % 10 == 0 and verbose:
+                print("[MF] epoch:{}, xent:{}".format(epoch, epoch_loss))
+
+            if epoch == num_epoch - 1:
+                print("[MF] Reach preset epochs, it seems does not converge.")
+
+    def predict(self, x):
+        pred = self.forward(x)
+        pred = self.sigmoid(pred)
+        return pred.detach().numpy()
+
+
+class MF_BaseModel(nn.Module):
+    def __init__(self, num_users, num_items, embedding_k=4, *args, **kwargs):
+        super(MF_BaseModel, self).__init__()
+        self.num_users = num_users
+        self.num_items = num_items
+        self.embedding_k = embedding_k
+        self.W = torch.nn.Embedding(self.num_users, self.embedding_k)
+        self.H = torch.nn.Embedding(self.num_items, self.embedding_k)
+
+        self.sigmoid = torch.nn.Sigmoid()
+        self.xent_func = torch.nn.BCELoss()
+
+    def forward(self, x, is_training=False):
+        user_idx = torch.LongTensor(x[:, 0])
+        item_idx = torch.LongTensor(x[:, 1])
+        U_emb = self.W(user_idx)
+        V_emb = self.H(item_idx)
+
+        out = torch.sum(U_emb.mul(V_emb), 1)
+
+        if is_training:
+            return out, U_emb, V_emb
+        else:
+            return out
+
+    def predict(self, x):
+        pred = self.forward(x)
+        return pred.detach().cpu()
+    
+#（1）constance
+class Constant(nn.Module):
+    def __init__(self, num_users, num_items, embedding_k=4, *args, **kwargs):
+        super(MF_Time_BaseModel, self).__init__()
+        self.num_users = num_users
+        self.num_items = num_items
+        self.embedding_k = embedding_k
+        self.W = torch.nn.Embedding(self.num_users, self.embedding_k)
+        self.H = torch.nn.Embedding(self.num_items, self.embedding_k)
+       
+        self.sigmoid = torch.nn.Sigmoid()
+        self.xent_func = torch.nn.BCELoss()
+
+    def forward(self, x, Observation_Matrix,is_training=False):
+        user_idx = torch.LongTensor(x[:, 0])
+        item_idx = torch.LongTensor(x[:, 1])
+
+        out=0
+        for u in range(len(user_idx)):
+            for i in range(len(item_idx)):
+                for t in range(4):
+                    out+=Observation_Matrix[u,i,t]
+        out=out/(len(user_idx)*len(item_idx)*4)
+
+            return out
+
+    def predict(self, x):
+        pred = self.forward(x)
+        return pred.detach().cpu()
+
+#（2）PoP
+class Pop(nn.Module):
+    def __init__(self, num_users, num_items, embedding_k=4, *args, **kwargs):
+        super(MF_Time_BaseModel, self).__init__()
+        self.num_users = num_users
+        self.num_items = num_items
+        self.embedding_k = embedding_k
+        self.W = torch.nn.Embedding(self.num_users, self.embedding_k)
+        self.H = torch.nn.Embedding(self.num_items, self.embedding_k)
+       
+        self.sigmoid = torch.nn.Sigmoid()
+        self.xent_func = torch.nn.BCELoss()
+
+    def forward(self, x, Observation_Matrix,is_training=False):
+        user_idx = torch.LongTensor(x[:, 0])
+        item_idx = torch.LongTensor(x[:, 1])
+        time_idx = torch.LongTensor(x[:, 2])
+        total=0
+        out=[]
+        for i in range(len(item_idx)):
+            for u in range(len(user_idx)):
+                for t in range(4):
+                    total+=Observation_Matrix[u,i,t]
+            out.append(total/(len(user_idx)*4))
+            total=0
+
+        if is_training:
+            return out, U_emb, V_emb
+        else:
+            return out
+
+    def predict(self, x):
+        pred = self.forward(x)
+        return pred.detach().cpu()
+
+#（3）T PoP
+class T_Pop(nn.Module):
+    def __init__(self, num_users, num_items, embedding_k=4, *args, **kwargs):
+        super(MF_Time_BaseModel, self).__init__()
+        self.num_users = num_users
+        self.num_items = num_items
+        self.embedding_k = embedding_k
+        self.W = torch.nn.Embedding(self.num_users, self.embedding_k)
+        self.H = torch.nn.Embedding(self.num_items, self.embedding_k)
+       
+        self.sigmoid = torch.nn.Sigmoid()
+        self.xent_func = torch.nn.BCELoss()
+
+    def forward(self, x, Observation_Matrix,is_training=False):
+        user_idx = torch.LongTensor(x[:, 0])
+        item_idx = torch.LongTensor(x[:, 1])
+        time_idx = torch.LongTensor(x[:, 2])
+        out=0
+        
+        for u in range(len(user_idx)):
+            out+=Observation_Matrix[u,i,t]
+        out=out/len(user_idx)
+
+        if is_training:
+            return out, U_emb, V_emb
+        else:
+            return out
+
+    def predict(self, x):
+        pred = self.forward(x)
+        return pred.detach().cpu()
+        
+#（5）TMF
+class TMF(nn.Module):
+    def __init__(self, num_users, num_items, embedding_k=4, *args, **kwargs):
+        super(MF_Time_BaseModel, self).__init__()
+        self.num_users = num_users
+        self.num_items = num_items
+        self.embedding_k = embedding_k
+        self.W = torch.nn.Embedding(self.num_users, self.embedding_k)
+        self.H = torch.nn.Embedding(self.num_items, self.embedding_k)
+        self.bt = torch.nn.Embedding(1, 4)
+        self.sigmoid = torch.nn.Sigmoid()
+        self.xent_func = torch.nn.BCELoss()
+
+    def forward(self, x, is_training=False):
+        user_idx = torch.LongTensor(x[:, 0])
+        item_idx = torch.LongTensor(x[:, 1])
+        time_idx = torch.LongTensor(x[:, 2])
+        out=[]
+        U_emb = self.W(user_idx)
+        V_emb = self.H(item_idx)
+        
+        for i in range(len(x)):
+            if x[i,2] == 1:
+                out.append(torch.sum(U_emb[i].mul(V_emb[i]))+self.bt[1])
+            if x[i,2] == 2:
+                out.append(torch.sum(U_emb[i].mul(V_emb[i]))+self.bt[2])
+            if x[i,3] == 3:
+                out.append(torch.sum(U_emb[i].mul(V_emb[i]))+self.bt[3])
+            if x[i,4] == 4:
+                out.append(torch.sum(U_emb[i].mul(V_emb[i]))+self.bt[4])
+            
+        #out = torch.sum(U_emb.mul(V_emb), 1)
+
+        if is_training:
+            return out, U_emb, V_emb
+        else:
+            return out
+
+    def predict(self, x):
+        pred = self.forward(x)
+        return pred.detach().cpu()
+
+#（6）TTF
+class TTF(nn.Module):
+    def __init__(self, num_users, num_items, embedding_k=4, *args, **kwargs):
+        super(MF_Time_BaseModel, self).__init__()
+        self.num_users = num_users
+        self.num_items = num_items
+        self.embedding_k = embedding_k
+        self.W = torch.nn.Embedding(self.num_users, self.embedding_k)
+        self.H = torch.nn.Embedding(self.num_items, self.embedding_k)
+        self.At = torch.nn.Embedding(self.num_items, self.embedding_k)
+        self.sigmoid = torch.nn.Sigmoid()
+        self.xent_func = torch.nn.BCELoss()
+
+    def forward(self, x, is_training=False):
+        user_idx = torch.LongTensor(x[:, 0])
+        item_idx = torch.LongTensor(x[:, 1])
+        time_idx = torch.LongTensor(x[:, 2])
+        out=[]
+        U_emb = self.W(user_idx)
+        V_emb = self.H(item_idx)
+        T_emb = self.At(time_idx)
+        
+        for i in range(len(x)):
+            if x[i,2] == 1:
+                out.append(torch.sum(U_emb[i].mul(V_emb[i] * T_emb[i])))
+            if x[i,2] == 2:
+                out.append(torch.sum(U_emb[i].mul(V_emb[i] * T_emb[i])))
+            if x[i,3] == 3:
+                out.append(torch.sum(U_emb[i].mul(V_emb[i] * T_emb[i])))
+            if x[i,4] == 4:
+                out.append(torch.sum(U_emb[i].mul(V_emb[i] * T_emb[i])))
+            
+        #out = torch.sum(U_emb.mul(V_emb), 1)
+
+        if is_training:
+            return out, U_emb, V_emb
+        else:
+            return out
+
+    def predict(self, x):
+        pred = self.forward(x)
+        return pred.detach().cpu()
+
+#（7）TFF++
+class TTF_Plus_Plus(nn.Module):
+    def __init__(self, num_users, num_items, embedding_k=4, *args, **kwargs):
+        super(MF_Time_BaseModel, self).__init__()
+        self.num_users = num_users
+        self.num_items = num_items
+        self.embedding_k = embedding_k
+        self.W = torch.nn.Embedding(self.num_users, self.embedding_k)
+        self.H = torch.nn.Embedding(self.num_items, self.embedding_k)
+        self.At = torch.nn.Embedding(self.num_items, self.embedding_k)
+        self.sigmoid = torch.nn.Sigmoid()
+        self.xent_func = torch.nn.BCELoss()
+
+    def forward(self, x, is_training=False):
+        user_idx = torch.LongTensor(x[:, 0])
+        item_idx = torch.LongTensor(x[:, 1])
+        time_idx = torch.LongTensor(x[:, 2])
+        out=[]
+        U_emb = self.W(user_idx)
+        V_emb = self.H(item_idx)
+        T_emb = self.At(time_idx)
+        
+        for i in range(len(x)):
+            if x[i,2] == 1:
+                out.append(torch.sum(U_emb[i].mul(V_emb[i] + T_emb[i])))
+            if x[i,2] == 2:
+                out.append(torch.sum(U_emb[i].mul(V_emb[i] + T_emb[i])))
+            if x[i,3] == 3:
+                out.append(torch.sum(U_emb[i].mul(V_emb[i] + T_emb[i])))
+            if x[i,4] == 4:
+                out.append(torch.sum(U_emb[i].mul(V_emb[i] + T_emb[i])))
+            
+        #out = torch.sum(U_emb.mul(V_emb), 1)
+
+        if is_training:
+            return out, U_emb, V_emb
+        else:
+            return out
+
+    def predict(self, x):
+        pred = self.forward(x)
+        return pred.detach().cpu()
+    
+class MF_Time_IPS(nn.Module):
+    def __init__(self, num_users, num_items, embedding_k=4, *args, **kwargs):
+        super(MF_Time_IPS, self).__init__()
+        self.num_users = num_users
+        self.num_items = num_items
+        self.embedding_k = embedding_k
+        self.prediction_model = MF_BaseModel(
+            num_users=self.num_users, num_items=self.num_items, embedding_k=self.embedding_k)
+        self.propensity_model = MF_Time_BaseModel(
+            num_users=self.num_users, num_items=self.num_items, embedding_k=self.embedding_k)
+
+        self.sigmoid = torch.nn.Sigmoid()
+        self.xent_func = torch.nn.BCELoss()
+
+    def fit(self, x, y, G = 4,
+        num_epoch=1000, batch_size=128, lr=0.05, lamb=0, 
+        tol=1e-4, verbose=True):
+
+        optimizer_pred = torch.optim.Adam(self.prediction_model.parameters(), lr=lr, weight_decay=lamb)
+        optimizer_prop = torch.optim.Adam(self.propensity_model.parameters(), lr=lr, weight_decay=lamb)
+        
+        last_loss = 1e9
+        x_all = generate_total_sample(self.num_users, self.num_items)
+        
+        num_sample = len(x)
+        total_batch = num_sample // batch_size
+
+        early_stop = 0
+        
+        Observation_Matrix = np.zeros((self.num_users, self.num_items, 4))
+        for i in range(num_sample):
+            Observation_Matrix[x[i][0], x[i][1], x[i][2]] = 1
+            
+        #Observation_Matrix.reshape(self.num_users * self.num_items)
+         
+        for epoch in range(num_epoch):
+            all_idx = np.arange(num_sample)
+            np.random.shuffle(all_idx)
+            epoch_loss = 0
+            
+            ul_idxs = np.arange(x_all.shape[0]) # all
+            np.random.shuffle(ul_idxs)
+            
+            for idx in range(total_batch):
+                # mini-batch training
+                selected_idx = all_idx[batch_size*idx:(idx+1)*batch_size]
+                
+                sub_x = x[selected_idx]
+                sub_y = y[selected_idx]
+                               
+                # propensity score
+                inv_prop = 1/self.sigmoid(self.propensity_model.forward(sub_x))
+                #inv_prop = self.sigmoid(inv_prop)
+                
+                sub_y = torch.Tensor(sub_y)
+
+                pred, u_emb, v_emb = self.prediction_model.forward(sub_x, True)
+                pred = self.sigmoid(pred)
+
+                xent_loss = F.binary_cross_entropy(pred, sub_y,
+                    weight=inv_prop.detach())
+
+                loss = xent_loss
+
+                optimizer_pred.zero_grad()
+                loss.backward()
+                optimizer_pred.step()
+                
+                
+                x_sampled = x_all[ul_idxs[G*idx* batch_size : G*(idx+1)*batch_size]]
+                prop = self.propensity_model.forward(x_sampled)
+                prop = self.sigmoid(prop)
+                #print(Observation_Matrix.shape)
+                #print(Observation_Matrix[[289, 299], [289, 299]])
+                #print(x_sampled[:,1])
+                ground_truth = torch.Tensor(Observation_Matrix[x_sampled[:, 0], x_sampled[:, 1]])
+#                 print(ground_truth)
+#                 print(prop)
+                prop_loss = F.binary_cross_entropy(prop, ground_truth)
+                
+                optimizer_prop.zero_grad()
+                prop_loss.backward()
+                optimizer_prop.step()                
+                
+                epoch_loss += xent_loss.detach().numpy()
+
+            relative_loss_div = (last_loss-epoch_loss)/(last_loss+1e-10)
+            if  relative_loss_div < tol:
+                if early_stop > 5:
+                    print("[MF-IPS] epoch:{}, xent:{}".format(epoch, epoch_loss))
+                    break
+                early_stop += 1
+                
+            last_loss = epoch_loss
+
+            if epoch % 10 == 0 and verbose:
+                print("[MF-IPS] epoch:{}, xent:{}".format(epoch, epoch_loss))
+
+            if epoch == num_epoch - 1:
+                print("[MF-IPS] Reach preset epochs, it seems does not converge.")
+
+    def predict(self, x):
+        pred = self.prediction_model.forward(x)
+        pred = self.sigmoid(pred)
+        return pred.detach().numpy()
+
+#     def _compute_IPS(self,x,y,y_ips=None):
+#         if y_ips is None:
+#             one_over_zl = np.ones(len(y))
+#         else:
+#             py1 = y_ips.sum() / len(y_ips)
+#             py0 = 1 - py1
+#             po1 = len(x) / (x[:,0].max() * x[:,1].max())
+#             py1o1 = y.sum() / len(y)
+#             py0o1 = 1 - py1o1
+
+#             propensity = np.zeros(len(y))
+
+#             propensity[y == 0] = (py0o1 * po1) / py0
+#             propensity[y == 1] = (py1o1 * po1) / py1
+#             one_over_zl = 1 / propensity
+
+#         one_over_zl = torch.Tensor(one_over_zl)
+#         return one_over_zl
+    
+
+#(8)TMTF   
+class MF_Time_Tensor_BaseModel(nn.Module):
+    def __init__(self, num_users, num_items, embedding_k=4, *args, **kwargs):
+        super(MF_Time_BaseModel, self).__init__()
+        self.num_users = num_users
+        self.num_items = num_items
+        self.embedding_k = embedding_k
+        self.W = torch.nn.Embedding(self.num_users, self.embedding_k)
+        self.H = torch.nn.Embedding(self.num_items, self.embedding_k)
+        
+        self.at1 = torch.nn.Embedding(self.num_items, self.embedding_k)
+        self.at2 = torch.nn.Embedding(self.num_items, self.embedding_k)
+        self.at3 = torch.nn.Embedding(self.num_items, self.embedding_k)
+        self.at4 = torch.nn.Embedding(self.num_items, self.embedding_k)
+        self.bt = torch.nn.Embedding(1,4)
+            
+        self.sigmoid = torch.nn.Sigmoid()
+        self.xent_func = torch.nn.BCELoss()
+
+    def forward(self, x, is_training=False):
+        user_idx = torch.LongTensor(x[:, 0])
+        item_idx = torch.LongTensor(x[:, 1])
+        time_idx = torch.LongTensor(x[:, 2])
+        
+        
+        U_emb = self.W(user_idx)
+        V_emb = self.H(item_idx)
+        
+        if time_idx == 1:
+            out1 = torch.sum(U_emb.mul(V_emb + self.at1), 1) + self.bt[0]
+        if time_idx == 2:
+            out2 = torch.sum(U_emb.mul(V_emb + self.at2), 1) + self.bt[1]
+        if time_idx == 3:
+            out3 = torch.sum(U_emb.mul(V_emb + self.at3), 1) + self.bt[2]
+        if time_idx == 4:
+            out4 = torch.sum(U_emb.mul(V_emb + self.at4), 1) + self.bt[3] 
+            
+        #out = torch.sum(U_emb.mul(V_emb), 1)
+
+        if is_training:
+            return out, U_emb, V_emb
+        else:
+            return out
+
+    def predict(self, x):
+        pred = self.forward(x)
+        return pred.detach().cpu()
